@@ -188,8 +188,8 @@ std::string ManifestLayer::LayerDescription::get_manifest_str() const {
 
 VkLayerProperties ManifestLayer::LayerDescription::get_layer_properties() const {
     VkLayerProperties properties{};
-    strncpy(properties.layerName, name.c_str(), 256);
-    strncpy(properties.description, description.c_str(), 256);
+    copy_string_to_char_array(name, properties.layerName, VK_MAX_EXTENSION_NAME_SIZE);
+    copy_string_to_char_array(description, properties.description, VK_MAX_EXTENSION_NAME_SIZE);
     properties.implementationVersion = implementation_version;
     properties.specVersion = api_version;
     return properties;
@@ -247,6 +247,7 @@ std::string fixup_backslashes_in_path(std::string const& in_path) {
     }
     return out;
 }
+fs::path fixup_backslashes_in_path(fs::path const& in_path) { return fixup_backslashes_in_path(in_path.str()); }
 
 path& path::operator+=(path const& in) {
     contents += in.contents;
@@ -362,11 +363,25 @@ int delete_folder(path const& folder) {
         // nothing to delete
         return 0;
     }
-    bool ret = RemoveDirectoryA(folder.c_str());
-    if (ret == 0) {
-        print_error_message(ERROR_REMOVEDIRECTORY_FAILED, "RemoveDirectoryA");
+    std::string search_path = folder.str() + "/*.*";
+    std::string s_p = folder.str() + "/";
+    WIN32_FIND_DATA fd;
+    HANDLE hFind = ::FindFirstFileA(search_path.c_str(), &fd);
+    if (hFind != INVALID_HANDLE_VALUE) {
+        do {
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+                if (!string_eq(fd.cFileName, ".") && !string_eq(fd.cFileName, "..")) {
+                    delete_folder(s_p + fd.cFileName);
+                }
+            } else {
+                std::string child_name = s_p + fd.cFileName;
+                DeleteFile(child_name.c_str());
+            }
+        } while (::FindNextFile(hFind, &fd));
+        ::FindClose(hFind);
+        _rmdir(folder.c_str());
     }
-    return ret;
+    return 0;
 #else
     DIR* dir = opendir(folder.c_str());
     if (!dir) {
@@ -402,10 +417,15 @@ FolderManager::FolderManager(path root_path, std::string name, DebugMode debug) 
     create_folder(folder);
 }
 FolderManager::~FolderManager() {
-    for (auto& file : files) {
+    auto list_of_files_to_delete = files;
+    // remove(file) modifies the files variable, copy the list before deleting it
+    // Note: the allocation tests currently leak the loaded driver handles because in an OOM scenario the loader doesn't bother
+    // removing those. Since this is in an OOM situation, it is a low priority to fix. It does have the effect that Windows will
+    // be unable to delete the binaries that were leaked.
+    for (auto& file : list_of_files_to_delete) {
         if (debug >= DebugMode::log) std::cout << "Removing manifest " << file << " at " << (folder / file).str() << "\n";
         if (debug != DebugMode::no_delete) {
-            std::remove((folder / file).c_str());
+            remove(file);
         }
     }
     if (debug != DebugMode::no_delete) {
@@ -454,13 +474,17 @@ void FolderManager::remove(std::string const& name) {
     path out_path = folder / name;
     auto found = std::find(files.begin(), files.end(), name);
     if (found != files.end()) {
-        if (debug >= DebugMode::log) std::cout << "Removing manifest " << name << " at " << out_path.str() << "\n";
+        if (debug >= DebugMode::log) std::cout << "Removing file " << name << " at " << out_path.str() << "\n";
         if (debug != DebugMode::no_delete) {
-            std::remove(out_path.c_str());
+            int rc = std::remove(out_path.c_str());
+            if (rc != 0 && debug >= DebugMode::log) {
+                std::cerr << "Failed to remove file " << name << " at " << out_path.str() << "\n";
+            }
+
             files.erase(found);
         }
     } else {
-        if (debug >= DebugMode::log) std::cout << "Couldn't remove manifest " << name << " at " << out_path.str() << ".\n";
+        if (debug >= DebugMode::log) std::cout << "Couldn't remove file " << name << " at " << out_path.str() << ".\n";
     }
 }
 
@@ -470,6 +494,8 @@ path FolderManager::copy_file(path const& file, std::string const& new_name) {
     auto found = std::find(files.begin(), files.end(), new_name);
     if (found != files.end()) {
         if (debug >= DebugMode::log) std::cout << "File location already contains" << new_name << ". Is this a bug?\n";
+    } else if (file.str() == new_filepath.str()) {
+        if (debug >= DebugMode::log) std::cout << "Trying to copy " << new_name << " into itself. Is this a bug?\n";
     } else {
         if (debug >= DebugMode::log) std::cout << "Copying file" << file.str() << " to " << new_filepath.str() << "\n";
         files.emplace_back(new_name);
@@ -481,7 +507,7 @@ path FolderManager::copy_file(path const& file, std::string const& new_name) {
     }
     std::ofstream dst(new_filepath.str(), std::ios::binary);
     if (!dst) {
-        std::cerr << "Failed to create file " << file.str() << " for copying to\n";
+        std::cerr << "Failed to create file " << new_filepath.str() << " for copying to\n";
         return new_filepath;
     }
     dst << src.rdbuf();
@@ -505,13 +531,16 @@ VulkanFunctions::VulkanFunctions() : loader(FRAMEWORK_VULKAN_LIBRARY_PATH) {
     vkGetPhysicalDeviceFeatures = loader.get_symbol<PFN_vkGetPhysicalDeviceFeatures>("vkGetPhysicalDeviceFeatures");
     vkGetPhysicalDeviceFeatures2 = loader.get_symbol<PFN_vkGetPhysicalDeviceFeatures2>("vkGetPhysicalDeviceFeatures2");
     vkGetPhysicalDeviceFormatProperties = loader.get_symbol<PFN_vkGetPhysicalDeviceFormatProperties>("vkGetPhysicalDeviceFormatProperties");
+    vkGetPhysicalDeviceFormatProperties2 = loader.get_symbol<PFN_vkGetPhysicalDeviceFormatProperties2>("vkGetPhysicalDeviceFormatProperties2");
     vkGetPhysicalDeviceImageFormatProperties = loader.get_symbol<PFN_vkGetPhysicalDeviceImageFormatProperties>("vkGetPhysicalDeviceImageFormatProperties");
+    vkGetPhysicalDeviceImageFormatProperties2 = loader.get_symbol<PFN_vkGetPhysicalDeviceImageFormatProperties2>("vkGetPhysicalDeviceImageFormatProperties2");
+    vkGetPhysicalDeviceSparseImageFormatProperties = loader.get_symbol<PFN_vkGetPhysicalDeviceSparseImageFormatProperties>("vkGetPhysicalDeviceSparseImageFormatProperties");
+    vkGetPhysicalDeviceSparseImageFormatProperties2 = loader.get_symbol<PFN_vkGetPhysicalDeviceSparseImageFormatProperties2>("vkGetPhysicalDeviceSparseImageFormatProperties2");
     vkGetPhysicalDeviceProperties = loader.get_symbol<PFN_vkGetPhysicalDeviceProperties>("vkGetPhysicalDeviceProperties");
     vkGetPhysicalDeviceProperties2 = loader.get_symbol<PFN_vkGetPhysicalDeviceProperties2>("vkGetPhysicalDeviceProperties2");
     vkGetPhysicalDeviceQueueFamilyProperties = loader.get_symbol<PFN_vkGetPhysicalDeviceQueueFamilyProperties>("vkGetPhysicalDeviceQueueFamilyProperties");
     vkGetPhysicalDeviceQueueFamilyProperties2 = loader.get_symbol<PFN_vkGetPhysicalDeviceQueueFamilyProperties2>("vkGetPhysicalDeviceQueueFamilyProperties2");
     vkGetPhysicalDeviceMemoryProperties = loader.get_symbol<PFN_vkGetPhysicalDeviceMemoryProperties>("vkGetPhysicalDeviceMemoryProperties");
-    vkGetPhysicalDeviceFormatProperties2 = loader.get_symbol<PFN_vkGetPhysicalDeviceFormatProperties2>("vkGetPhysicalDeviceFormatProperties2");
     vkGetPhysicalDeviceMemoryProperties2 = loader.get_symbol<PFN_vkGetPhysicalDeviceMemoryProperties2>("vkGetPhysicalDeviceMemoryProperties2");
     vkGetPhysicalDeviceSurfaceSupportKHR = loader.get_symbol<PFN_vkGetPhysicalDeviceSurfaceSupportKHR>("vkGetPhysicalDeviceSurfaceSupportKHR");
     vkGetPhysicalDeviceSurfaceFormatsKHR = loader.get_symbol<PFN_vkGetPhysicalDeviceSurfaceFormatsKHR>("vkGetPhysicalDeviceSurfaceFormatsKHR");
@@ -519,94 +548,103 @@ VulkanFunctions::VulkanFunctions() : loader(FRAMEWORK_VULKAN_LIBRARY_PATH) {
     vkGetPhysicalDeviceSurfaceCapabilitiesKHR = loader.get_symbol<PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR>("vkGetPhysicalDeviceSurfaceCapabilitiesKHR");
     vkEnumerateDeviceExtensionProperties = loader.get_symbol<PFN_vkEnumerateDeviceExtensionProperties>("vkEnumerateDeviceExtensionProperties");
     vkEnumerateDeviceLayerProperties = loader.get_symbol<PFN_vkEnumerateDeviceLayerProperties>("vkEnumerateDeviceLayerProperties");
+    vkGetPhysicalDeviceExternalBufferProperties = loader.get_symbol<PFN_vkGetPhysicalDeviceExternalBufferProperties>("vkGetPhysicalDeviceExternalBufferProperties");
+    vkGetPhysicalDeviceExternalFenceProperties = loader.get_symbol<PFN_vkGetPhysicalDeviceExternalFenceProperties>("vkGetPhysicalDeviceExternalFenceProperties");
+    vkGetPhysicalDeviceExternalSemaphoreProperties = loader.get_symbol<PFN_vkGetPhysicalDeviceExternalSemaphoreProperties>("vkGetPhysicalDeviceExternalSemaphoreProperties");
 
     vkDestroySurfaceKHR = loader.get_symbol<PFN_vkDestroySurfaceKHR>("vkDestroySurfaceKHR");
     vkGetDeviceProcAddr = loader.get_symbol<PFN_vkGetDeviceProcAddr>("vkGetDeviceProcAddr");
     vkCreateDevice = loader.get_symbol<PFN_vkCreateDevice>("vkCreateDevice");
 
+    vkCreateHeadlessSurfaceEXT = loader.get_symbol<PFN_vkCreateHeadlessSurfaceEXT>("vkCreateHeadlessSurfaceEXT");
+    vkCreateDisplayPlaneSurfaceKHR = loader.get_symbol<PFN_vkCreateDisplayPlaneSurfaceKHR>("vkCreateDisplayPlaneSurfaceKHR");
+    vkGetPhysicalDeviceDisplayPropertiesKHR = loader.get_symbol<PFN_vkGetPhysicalDeviceDisplayPropertiesKHR>("vkGetPhysicalDeviceDisplayPropertiesKHR");
+    vkGetPhysicalDeviceDisplayPlanePropertiesKHR = loader.get_symbol<PFN_vkGetPhysicalDeviceDisplayPlanePropertiesKHR>("vkGetPhysicalDeviceDisplayPlanePropertiesKHR");
+    vkGetDisplayPlaneSupportedDisplaysKHR = loader.get_symbol<PFN_vkGetDisplayPlaneSupportedDisplaysKHR>("vkGetDisplayPlaneSupportedDisplaysKHR");
+    vkGetDisplayModePropertiesKHR = loader.get_symbol<PFN_vkGetDisplayModePropertiesKHR>("vkGetDisplayModePropertiesKHR");
+    vkCreateDisplayModeKHR = loader.get_symbol<PFN_vkCreateDisplayModeKHR>("vkCreateDisplayModeKHR");
+    vkGetDisplayPlaneCapabilitiesKHR = loader.get_symbol<PFN_vkGetDisplayPlaneCapabilitiesKHR>("vkGetDisplayPlaneCapabilitiesKHR");
+    vkGetPhysicalDevicePresentRectanglesKHR = loader.get_symbol<PFN_vkGetPhysicalDevicePresentRectanglesKHR>("vkGetPhysicalDevicePresentRectanglesKHR");
+    vkGetPhysicalDeviceDisplayProperties2KHR = loader.get_symbol<PFN_vkGetPhysicalDeviceDisplayProperties2KHR>("vkGetPhysicalDeviceDisplayProperties2KHR");
+    vkGetPhysicalDeviceDisplayPlaneProperties2KHR = loader.get_symbol<PFN_vkGetPhysicalDeviceDisplayPlaneProperties2KHR>("vkGetPhysicalDeviceDisplayPlaneProperties2KHR");
+    vkGetDisplayModeProperties2KHR = loader.get_symbol<PFN_vkGetDisplayModeProperties2KHR>("vkGetDisplayModeProperties2KHR");
+    vkGetDisplayPlaneCapabilities2KHR = loader.get_symbol<PFN_vkGetDisplayPlaneCapabilities2KHR>("vkGetDisplayPlaneCapabilities2KHR");
+    vkGetPhysicalDeviceSurfaceCapabilities2KHR = loader.get_symbol<PFN_vkGetPhysicalDeviceSurfaceCapabilities2KHR>("vkGetPhysicalDeviceSurfaceCapabilities2KHR");
+    vkGetPhysicalDeviceSurfaceFormats2KHR = loader.get_symbol<PFN_vkGetPhysicalDeviceSurfaceFormats2KHR>("vkGetPhysicalDeviceSurfaceFormats2KHR");
+
 #ifdef VK_USE_PLATFORM_ANDROID_KHR
     vkCreateAndroidSurfaceKHR = loader.get_symbol<PFN_vkCreateAndroidSurfaceKHR>("vkCreateAndroidSurfaceKHR");
-#endif
+#endif  // VK_USE_PLATFORM_ANDROID_KHR
+#ifdef VK_USE_PLATFORM_DIRECTFB_EXT
+    vkCreateDirectFBSurfaceEXT = loader.get_symbol<PFN_vkCreateDirectFBSurfaceEXT>("vkCreateDirectFBSurfaceEXT");
+    vkGetPhysicalDeviceDirectFBPresentationSupportEXT = loader.get_symbol<PFN_vkGetPhysicalDeviceDirectFBPresentationSupportEXT>("vkGetPhysicalDeviceDirectFBPresentationSupportEXT");
+#endif  // VK_USE_PLATFORM_DIRECTFB_EXT
+#ifdef VK_USE_PLATFORM_FUCHSIA
+    vkCreateImagePipeSurfaceFUCHSIA = loader.get_symbol<PFN_vkCreateImagePipeSurfaceFUCHSIA>("vkCreateImagePipeSurfaceFUCHSIA");
+#endif  // VK_USE_PLATFORM_FUCHSIA
+#ifdef VK_USE_PLATFORM_GGP
+    vkCreateStreamDescriptorSurfaceGGP = loader.get_symbol<PFN_vkCreateStreamDescriptorSurfaceGGP>("vkCreateStreamDescriptorSurfaceGGP");
+#endif  // VK_USE_PLATFORM_GGP
+#ifdef VK_USE_PLATFORM_IOS_MVK
+    vkCreateIOSSurfaceMVK = loader.get_symbol<PFN_vkCreateIOSSurfaceMVK>("vkCreateIOSSurfaceMVK");
+#endif  // VK_USE_PLATFORM_IOS_MVK
+#ifdef VK_USE_PLATFORM_MACOS_MVK
+    vkCreateMacOSSurfaceMVK = loader.get_symbol<PFN_vkCreateMacOSSurfaceMVK>("vkCreateMacOSSurfaceMVK");
+#endif  // VK_USE_PLATFORM_MACOS_MVK
 #ifdef VK_USE_PLATFORM_METAL_EXT
-    vkCreateMetalSurfaceEXT = loader.get_symbol<PFN_vkCreateMetalSurfaceEXT>("vkCreateMetalSurfaceEXT")
-#endif
+    vkCreateMetalSurfaceEXT = loader.get_symbol<PFN_vkCreateMetalSurfaceEXT>("vkCreateMetalSurfaceEXT");
+#endif  // VK_USE_PLATFORM_METAL_EXT
+#ifdef VK_USE_PLATFORM_SCREEN_QNX
+    vkCreateScreenSurfaceQNX = loader.get_symbol<PFN_vkCreateScreenSurfaceQNX>("vkCreateScreenSurfaceQNX");
+    vkGetPhysicalDeviceScreenPresentationSupportQNX = loader.get_symbol<PFN_vkGetPhysicalDeviceScreenPresentationSupportQNX>("vkGetPhysicalDeviceScreenPresentationSupportQNX");
+#endif  // VK_USE_PLATFORM_SCREEN_QNX
 #ifdef VK_USE_PLATFORM_WAYLAND_KHR
     vkCreateWaylandSurfaceKHR = loader.get_symbol<PFN_vkCreateWaylandSurfaceKHR>("vkCreateWaylandSurfaceKHR");
-#endif
+    vkGetPhysicalDeviceWaylandPresentationSupportKHR = loader.get_symbol<PFN_vkGetPhysicalDeviceWaylandPresentationSupportKHR>("vkGetPhysicalDeviceWaylandPresentationSupportKHR");
+#endif  // VK_USE_PLATFORM_WAYLAND_KHR
 #ifdef VK_USE_PLATFORM_XCB_KHR
     vkCreateXcbSurfaceKHR = loader.get_symbol<PFN_vkCreateXcbSurfaceKHR>("vkCreateXcbSurfaceKHR");
-#endif
+    vkGetPhysicalDeviceXcbPresentationSupportKHR = loader.get_symbol<PFN_vkGetPhysicalDeviceXcbPresentationSupportKHR>("vkGetPhysicalDeviceXcbPresentationSupportKHR");
+#endif  // VK_USE_PLATFORM_XCB_KHR
 #ifdef VK_USE_PLATFORM_XLIB_KHR
     vkCreateXlibSurfaceKHR = loader.get_symbol<PFN_vkCreateXlibSurfaceKHR>("vkCreateXlibSurfaceKHR");
-#endif
+    vkGetPhysicalDeviceXlibPresentationSupportKHR = loader.get_symbol<PFN_vkGetPhysicalDeviceXlibPresentationSupportKHR>("vkGetPhysicalDeviceXlibPresentationSupportKHR");
+#endif  // VK_USE_PLATFORM_XLIB_KHR
 #ifdef VK_USE_PLATFORM_WIN32_KHR
     vkCreateWin32SurfaceKHR = loader.get_symbol<PFN_vkCreateWin32SurfaceKHR>("vkCreateWin32SurfaceKHR");
-#endif
+    vkGetPhysicalDeviceWin32PresentationSupportKHR = loader.get_symbol<PFN_vkGetPhysicalDeviceWin32PresentationSupportKHR>("vkGetPhysicalDeviceWin32PresentationSupportKHR");
+#endif  // VK_USE_PLATFORM_WIN32_KHR
+
     vkDestroyDevice = loader.get_symbol<PFN_vkDestroyDevice>("vkDestroyDevice");
     vkGetDeviceQueue = loader.get_symbol<PFN_vkGetDeviceQueue>("vkGetDeviceQueue");
+
     // clang-format on
 }
 
 InstanceCreateInfo::InstanceCreateInfo() {
-    inst_info.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
-    app_info.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
+    instance_info.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+    application_info.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
 }
 
 VkInstanceCreateInfo* InstanceCreateInfo::get() noexcept {
-    app_info.pApplicationName = app_name.c_str();
-    app_info.pEngineName = engine_name.c_str();
-    app_info.applicationVersion = app_version;
-    app_info.engineVersion = engine_version;
-    app_info.apiVersion = api_version;
-    inst_info.pApplicationInfo = &app_info;
-    inst_info.enabledLayerCount = static_cast<uint32_t>(enabled_layers.size());
-    inst_info.ppEnabledLayerNames = enabled_layers.data();
-    inst_info.enabledExtensionCount = static_cast<uint32_t>(enabled_extensions.size());
-    inst_info.ppEnabledExtensionNames = enabled_extensions.data();
-    return &inst_info;
-}
-InstanceCreateInfo& InstanceCreateInfo::set_application_name(std::string app_name) {
-    this->app_name = app_name;
-    return *this;
-}
-InstanceCreateInfo& InstanceCreateInfo::set_engine_name(std::string engine_name) {
-    this->engine_name = engine_name;
-    return *this;
-}
-InstanceCreateInfo& InstanceCreateInfo::set_app_version(uint32_t app_version) {
-    this->app_version = app_version;
-    return *this;
-}
-InstanceCreateInfo& InstanceCreateInfo::set_engine_version(uint32_t engine_version) {
-    this->engine_version = engine_version;
-    return *this;
-}
-InstanceCreateInfo& InstanceCreateInfo::set_api_version(uint32_t api_version) {
-    this->api_version = api_version;
-    return *this;
+    application_info.pApplicationName = app_name.c_str();
+    application_info.pEngineName = engine_name.c_str();
+    application_info.applicationVersion = app_version;
+    application_info.engineVersion = engine_version;
+    application_info.apiVersion = api_version;
+    instance_info.pApplicationInfo = &application_info;
+    instance_info.enabledLayerCount = static_cast<uint32_t>(enabled_layers.size());
+    instance_info.ppEnabledLayerNames = enabled_layers.data();
+    instance_info.enabledExtensionCount = static_cast<uint32_t>(enabled_extensions.size());
+    instance_info.ppEnabledExtensionNames = enabled_extensions.data();
+    return &instance_info;
 }
 InstanceCreateInfo& InstanceCreateInfo::set_api_version(uint32_t major, uint32_t minor, uint32_t patch) {
     this->api_version = VK_MAKE_API_VERSION(0, major, minor, patch);
     return *this;
 }
-InstanceCreateInfo& InstanceCreateInfo::add_layer(const char* layer_name) {
-    enabled_layers.push_back(layer_name);
-    return *this;
-}
-InstanceCreateInfo& InstanceCreateInfo::add_extension(const char* ext_name) {
-    enabled_extensions.push_back(ext_name);
-    return *this;
-}
 
-DeviceQueueCreateInfo::DeviceQueueCreateInfo() { queue.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO; }
-DeviceQueueCreateInfo& DeviceQueueCreateInfo::add_priority(float priority) {
-    priorities.push_back(priority);
-    return *this;
-}
-DeviceQueueCreateInfo& DeviceQueueCreateInfo::set_props(VkQueueFamilyProperties props) {
-    queue.queueCount = props.queueCount;
-    return *this;
-}
+DeviceQueueCreateInfo::DeviceQueueCreateInfo() { queue_create_info.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO; }
 
 VkDeviceCreateInfo* DeviceCreateInfo::get() noexcept {
     dev.enabledLayerCount = static_cast<uint32_t>(enabled_layers.size());
@@ -619,18 +657,4 @@ VkDeviceCreateInfo* DeviceCreateInfo::get() noexcept {
     dev.queueCreateInfoCount = static_cast<uint32_t>(queue_infos.size());
     dev.pQueueCreateInfos = queue_infos.data();
     return &dev;
-}
-DeviceCreateInfo& DeviceCreateInfo::add_layer(const char* layer_name) {
-    enabled_layers.push_back(layer_name);
-
-    return *this;
-}
-DeviceCreateInfo& DeviceCreateInfo::add_extension(const char* ext_name) {
-    enabled_extensions.push_back(ext_name);
-
-    return *this;
-}
-DeviceCreateInfo& DeviceCreateInfo::add_device_queue(DeviceQueueCreateInfo queue_info_detail) {
-    queue_info_details.push_back(queue_info_detail);
-    return *this;
 }

@@ -30,11 +30,12 @@
 class LayerTests : public ::testing::Test {
    protected:
     virtual void SetUp() {
-        env = std::unique_ptr<SingleICDShim>(new SingleICDShim(TestICDDetails(TEST_ICD_PATH_VERSION_6, VK_MAKE_VERSION(1, 0, 0))));
+        env = std::unique_ptr<FrameworkEnvironment>(new FrameworkEnvironment());
+        env->add_icd(TestICDDetails(TEST_ICD_PATH_VERSION_6));
     }
 
     virtual void TearDown() { env.reset(); }
-    std::unique_ptr<SingleICDShim> env;
+    std::unique_ptr<FrameworkEnvironment> env;
 };
 
 // Subtyping for organization
@@ -44,7 +45,7 @@ class MetaLayers : public LayerTests {};
 class OverrideMetaLayer : public LayerTests {};
 class LayerCreateInstance : public LayerTests {};
 
-void CheckLogForLayerString(SingleICDShim& env, const char* implicit_layer_name, bool check_for_enable) {
+void CheckLogForLayerString(FrameworkEnvironment& env, const char* implicit_layer_name, bool check_for_enable) {
     {
         InstWrapper inst{env.vulkan_functions};
         FillDebugUtilsCreateDetails(inst.create_info, env.debug_log);
@@ -63,15 +64,12 @@ TEST_F(ImplicitLayers, WithEnableAndDisableEnvVar) {
     const char* enable_env_var = "ENABLE_ME";
     const char* disable_env_var = "DISABLE_ME";
 
-    ManifestLayer::LayerDescription description{};
-    description.name = implicit_layer_name;
-    description.lib_path = TEST_LAYER_PATH_EXPORT_VERSION_2;
-    description.enable_environment = enable_env_var;
-    description.disable_environment = disable_env_var;
-
-    ManifestLayer implicit_layer;
-    implicit_layer.layers.push_back(description);
-    env->AddImplicitLayer(implicit_layer, "implicit_test_layer.json");
+    env->add_implicit_layer(ManifestLayer{}.add_layer(ManifestLayer::LayerDescription{}
+                                                          .set_name(implicit_layer_name)
+                                                          .set_lib_path(TEST_LAYER_PATH_EXPORT_VERSION_2)
+                                                          .set_disable_environment(disable_env_var)
+                                                          .set_enable_environment(enable_env_var)),
+                            "implicit_test_layer.json");
 
     uint32_t count = 0;
     ASSERT_EQ(VK_SUCCESS, env->vulkan_functions.vkEnumerateInstanceLayerProperties(&count, nullptr));
@@ -111,14 +109,11 @@ TEST_F(ImplicitLayers, OnlyDisableEnvVar) {
     const char* implicit_layer_name = "ImplicitTestLayer";
     const char* disable_env_var = "DISABLE_ME";
 
-    ManifestLayer::LayerDescription description{};
-    description.name = implicit_layer_name;
-    description.lib_path = TEST_LAYER_PATH_EXPORT_VERSION_2;
-    description.disable_environment = disable_env_var;
-
-    ManifestLayer implicit_layer;
-    implicit_layer.layers.push_back(description);
-    env->AddImplicitLayer(implicit_layer, "implicit_test_layer.json");
+    env->add_implicit_layer(ManifestLayer{}.add_layer(ManifestLayer::LayerDescription{}
+                                                          .set_name(implicit_layer_name)
+                                                          .set_lib_path(TEST_LAYER_PATH_EXPORT_VERSION_2)
+                                                          .set_disable_environment(disable_env_var)),
+                            "implicit_test_layer.json");
 
     uint32_t count = 0;
     ASSERT_EQ(VK_SUCCESS, env->vulkan_functions.vkEnumerateInstanceLayerProperties(&count, nullptr));
@@ -147,26 +142,21 @@ TEST_F(ImplicitLayers, OnlyDisableEnvVar) {
 
 TEST_F(MetaLayers, InvalidComponentLayer) {
     const char* meta_layer_name = "MetaTestLayer";
-    ManifestLayer::LayerDescription description{};
-    description.name = meta_layer_name;
-    description.component_layers = {"InvalidLayer1", "InvalidLayer2"};
-    description.disable_environment = "NotGonnaWork";
-    description.instance_extensions.push_back({"NeverGonnaGiveYouUp"});
-    description.device_extensions.push_back({"NeverGonnaLetYouDown"});
-
-    ManifestLayer meta_layer;
-    meta_layer.file_format_version = ManifestVersion(1, 1, 2);
-    meta_layer.layers.push_back(description);
-    env->AddImplicitLayer(meta_layer, "meta_test_layer.json");
+    env->add_implicit_layer(ManifestLayer{}
+                                .set_file_format_version(ManifestVersion(1, 1, 2))
+                                .add_layer(ManifestLayer::LayerDescription{}
+                                               .set_name(meta_layer_name)
+                                               .add_component_layers({"InvalidLayer1", "InvalidLayer2"})
+                                               .set_disable_environment("NotGonnaWork")
+                                               .add_instance_extension({"NeverGonnaGiveYouUp"})
+                                               .add_device_extension({"NeverGonnaLetYouDown"})),
+                            "meta_test_layer.json");
 
     const char* regular_layer_name = "TestLayer";
-    ManifestLayer::LayerDescription regular_description{};
-    regular_description.name = regular_layer_name;
-    regular_description.lib_path = TEST_LAYER_PATH_EXPORT_VERSION_1;
-
-    ManifestLayer regular_layer;
-    regular_layer.layers.push_back(regular_description);
-    env->AddExplicitLayer(regular_layer, "regular_test_layer.json");
+    env->add_explicit_layer(
+        ManifestLayer{}.add_layer(
+            ManifestLayer::LayerDescription{}.set_name(regular_layer_name).set_lib_path(TEST_LAYER_PATH_EXPORT_VERSION_2)),
+        "regular_test_layer.json");
 
     // should find 1, the 'regular' layer
     uint32_t layer_count = 1;
@@ -194,27 +184,22 @@ TEST_F(MetaLayers, InvalidComponentLayer) {
 
 TEST_F(OverrideMetaLayer, InvalidDisableEnvironment) {
     const char* regular_layer_name = "TestLayer";
-    ManifestLayer::LayerDescription regular_description{};
-    regular_description.name = regular_layer_name;
-    regular_description.api_version = VK_MAKE_API_VERSION(0, 1, 1, 0);
-    regular_description.lib_path = TEST_LAYER_PATH_EXPORT_VERSION_1;
-    regular_description.device_extensions.push_back({"NeverGonnaLetYouDown"});
-
-    ManifestLayer regular_layer;
-    regular_layer.layers.push_back(regular_description);
-    env->AddExplicitLayer(regular_layer, "regular_test_layer.json");
+    env->add_explicit_layer(ManifestLayer{}.add_layer(ManifestLayer::LayerDescription{}
+                                                          .set_name(regular_layer_name)
+                                                          .set_lib_path(TEST_LAYER_PATH_EXPORT_VERSION_1)
+                                                          .set_api_version(VK_MAKE_API_VERSION(0, 1, 1, 0))
+                                                          .add_device_extension({"NeverGonnaLetYouDown"})),
+                            "regular_test_layer.json");
 
     const char* lunarg_meta_layer_name = "VK_LAYER_LUNARG_override";
-    ManifestLayer::LayerDescription description{};
-    description.name = lunarg_meta_layer_name;
-    description.api_version = VK_MAKE_API_VERSION(0, 1, 1, 0);
-    description.component_layers = {regular_layer_name};
-    description.disable_environment = "DisableMeIfYouCan";
-
-    ManifestLayer lunarg_meta_layer;
-    lunarg_meta_layer.file_format_version = ManifestVersion(1, 1, 2);
-    lunarg_meta_layer.layers.push_back(description);
-    env->AddImplicitLayer(lunarg_meta_layer, "meta_test_layer.json");
+    env->add_implicit_layer(ManifestLayer{}
+                                .set_file_format_version(ManifestVersion(1, 1, 2))
+                                .add_layer(ManifestLayer::LayerDescription{}
+                                               .set_name(lunarg_meta_layer_name)
+                                               .set_api_version(VK_MAKE_API_VERSION(0, 1, 1, 0))
+                                               .add_component_layers({regular_layer_name})
+                                               .set_disable_environment("DisableMeIfYouCan")),
+                            "meta_test_layer.json");
 
     // should find 1, the 'regular' layer
     uint32_t layer_count = 2;
@@ -246,40 +231,36 @@ TEST_F(OverrideMetaLayer, InvalidDisableEnvironment) {
 TEST_F(LayerCreateInstance, GetPhysicalDeviceProperties2) {
     env->get_test_icd().physical_devices.push_back({});
     env->get_test_icd().icd_api_version = VK_MAKE_API_VERSION(0, 1, 1, 0);
+
     const char* regular_layer_name = "TestLayer";
-    ManifestLayer::LayerDescription regular_description{};
-    regular_description.name = regular_layer_name;
-    regular_description.lib_path = TEST_LAYER_PATH_EXPORT_VERSION_2;
+    env->add_explicit_layer(
+        ManifestLayer{}
+            .set_file_format_version(ManifestVersion(1, 1, 2))
+            .add_layer(
+                ManifestLayer::LayerDescription{}.set_name(regular_layer_name).set_lib_path(TEST_LAYER_PATH_EXPORT_VERSION_2)),
+        "regular_test_layer.json");
 
-    ManifestLayer regular_layer;
-    regular_layer.file_format_version = ManifestVersion(1, 1, 2);
-    regular_layer.layers.push_back(regular_description);
-    env->AddExplicitLayer(regular_layer, "regular_test_layer.json");
+    auto& layer = env->get_test_layer(0);
+    layer.set_create_instance_callback([](TestLayer& layer) -> VkResult {
+        uint32_t phys_dev_count = 0;
+        VkResult res = layer.instance_dispatch_table.EnumeratePhysicalDevices(layer.instance_handle, &phys_dev_count, nullptr);
+        if (res != VK_SUCCESS || phys_dev_count > 1) {
+            return VK_ERROR_INITIALIZATION_FAILED;  // expecting only a single physical device.
+        }
+        VkPhysicalDevice phys_dev{};
+        res = layer.instance_dispatch_table.EnumeratePhysicalDevices(layer.instance_handle, &phys_dev_count, &phys_dev);
+        if (res != VK_SUCCESS) {
+            return VK_ERROR_INITIALIZATION_FAILED;
+        }
+        VkPhysicalDeviceProperties2 props2{};
+        props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+        layer.instance_dispatch_table.GetPhysicalDeviceProperties2(phys_dev, &props2);
 
-    TestLayerHandle layer_handle{regular_description.lib_path};
-    auto& layer = layer_handle.get_test_layer();
-    layer.SetCreateInstanceCallback(
-        [](TestLayer& layer, void* data) -> VkResult {
-            uint32_t phys_dev_count = 0;
-            VkResult res = layer.instance_dispatch_table.EnumeratePhysicalDevices(layer.instance_handle, &phys_dev_count, nullptr);
-            if (res != VK_SUCCESS || phys_dev_count > 1) {
-                return VK_ERROR_INITIALIZATION_FAILED;  // expecting only a single physical device.
-            }
-            VkPhysicalDevice phys_dev{};
-            res = layer.instance_dispatch_table.EnumeratePhysicalDevices(layer.instance_handle, &phys_dev_count, &phys_dev);
-            if (res != VK_SUCCESS) {
-                return VK_ERROR_INITIALIZATION_FAILED;
-            }
-            VkPhysicalDeviceProperties2 props2{};
-            props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
-            layer.instance_dispatch_table.GetPhysicalDeviceProperties2(phys_dev, &props2);
-
-            VkPhysicalDeviceFeatures2 features2{};
-            features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
-            layer.instance_dispatch_table.GetPhysicalDeviceFeatures2(phys_dev, &features2);
-            return VK_SUCCESS;
-        },
-        nullptr);
+        VkPhysicalDeviceFeatures2 features2{};
+        features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+        layer.instance_dispatch_table.GetPhysicalDeviceFeatures2(phys_dev, &features2);
+        return VK_SUCCESS;
+    });
 
     InstWrapper inst{env->vulkan_functions};
     inst.create_info.add_layer(regular_layer_name).set_api_version(1, 1, 0);
@@ -288,34 +269,29 @@ TEST_F(LayerCreateInstance, GetPhysicalDeviceProperties2) {
 
 TEST_F(LayerCreateInstance, GetPhysicalDeviceProperties2KHR) {
     env->get_test_icd().physical_devices.push_back({});
-    env->get_test_icd().AddInstanceExtension({"VK_KHR_get_physical_device_properties2", 0});
+    env->get_test_icd().add_instance_extension({"VK_KHR_get_physical_device_properties2", 0});
+
     const char* regular_layer_name = "TestLayer";
-    ManifestLayer::LayerDescription regular_description{};
-    regular_description.name = regular_layer_name;
-    regular_description.lib_path = TEST_LAYER_PATH_EXPORT_VERSION_2;
+    env->add_explicit_layer(
+        ManifestLayer{}.add_layer(
+            ManifestLayer::LayerDescription{}.set_name(regular_layer_name).set_lib_path(TEST_LAYER_PATH_EXPORT_VERSION_2)),
+        "regular_test_layer.json");
 
-    ManifestLayer regular_layer;
-    regular_layer.layers.push_back(regular_description);
-    env->AddExplicitLayer(regular_layer, "regular_test_layer.json");
+    auto& layer = env->get_test_layer(0);
+    layer.set_create_instance_callback([](TestLayer& layer) -> VkResult {
+        uint32_t phys_dev_count = 1;
+        VkPhysicalDevice phys_dev{};
+        layer.instance_dispatch_table.EnumeratePhysicalDevices(layer.instance_handle, &phys_dev_count, &phys_dev);
 
-    TestLayerHandle layer_handle{regular_description.lib_path};
-    auto& layer = layer_handle.reset_layer();
-    layer.SetCreateInstanceCallback(
-        [](TestLayer& layer, void* data) -> VkResult {
-            uint32_t phys_dev_count = 1;
-            VkPhysicalDevice phys_dev{};
-            layer.instance_dispatch_table.EnumeratePhysicalDevices(layer.instance_handle, &phys_dev_count, &phys_dev);
+        VkPhysicalDeviceProperties2KHR props2{};
+        props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2_KHR;
+        layer.instance_dispatch_table.GetPhysicalDeviceProperties2KHR(phys_dev, &props2);
 
-            VkPhysicalDeviceProperties2KHR props2{};
-            props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2_KHR;
-            layer.instance_dispatch_table.GetPhysicalDeviceProperties2KHR(phys_dev, &props2);
-
-            VkPhysicalDeviceFeatures2KHR features2{};
-            features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2_KHR;
-            layer.instance_dispatch_table.GetPhysicalDeviceFeatures2KHR(phys_dev, &features2);
-            return VK_SUCCESS;
-        },
-        nullptr);
+        VkPhysicalDeviceFeatures2KHR features2{};
+        features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2_KHR;
+        layer.instance_dispatch_table.GetPhysicalDeviceFeatures2KHR(phys_dev, &features2);
+        return VK_SUCCESS;
+    });
 
     InstWrapper inst{env->vulkan_functions};
     inst.create_info.add_layer(regular_layer_name).add_extension("VK_KHR_get_physical_device_properties2");
@@ -326,31 +302,22 @@ TEST_F(ExplicitLayers, WrapObjects) {
     auto& driver = env->get_test_icd();
 
     const char* wrap_objects_name = "WrapObjectsLayer";
-    ManifestLayer::LayerDescription wrap_objects_description{};
-    wrap_objects_description.name = wrap_objects_name;
-    wrap_objects_description.lib_path = TEST_LAYER_WRAP_OBJECTS;
-
-    ManifestLayer wrap_objects_layer;
-    wrap_objects_layer.layers.push_back(wrap_objects_description);
-    env->AddExplicitLayer(wrap_objects_layer, "wrap_objects_layer.json");
+    env->add_explicit_layer(
+        ManifestLayer{}.add_layer(
+            ManifestLayer::LayerDescription{}.set_name(wrap_objects_name).set_lib_path(TEST_LAYER_WRAP_OBJECTS)),
+        "wrap_objects_layer.json");
 
     const char* regular_layer_name_1 = "RegularLayer1";
-    ManifestLayer::LayerDescription regular_description_1{};
-    regular_description_1.name = regular_layer_name_1;
-    regular_description_1.lib_path = TEST_LAYER_PATH_EXPORT_VERSION_2;
-
-    ManifestLayer regular_layer_1;
-    regular_layer_1.layers.push_back(regular_description_1);
-    env->AddExplicitLayer(regular_layer_1, "regular_layer_1.json");
+    env->add_explicit_layer(
+        ManifestLayer{}.add_layer(
+            ManifestLayer::LayerDescription{}.set_name(regular_layer_name_1).set_lib_path(TEST_LAYER_PATH_EXPORT_VERSION_2)),
+        "regular_layer_1.json");
 
     const char* regular_layer_name_2 = "RegularLayer2";
-    ManifestLayer::LayerDescription regular_description_2{};
-    regular_description_2.name = regular_layer_name_2;
-    regular_description_2.lib_path = TEST_LAYER_PATH_EXPORT_VERSION_2;
-
-    ManifestLayer regular_layer_2;
-    regular_layer_2.layers.push_back(regular_description_2);
-    env->AddExplicitLayer(regular_layer_2, "regular_layer_2.json");
+    env->add_explicit_layer(
+        ManifestLayer{}.add_layer(
+            ManifestLayer::LayerDescription{}.set_name(regular_layer_name_2).set_lib_path(TEST_LAYER_PATH_EXPORT_VERSION_2)),
+        "regular_layer_2.json");
 
     MockQueueFamilyProperties family_props{{VK_QUEUE_GRAPHICS_BIT, 1, 0, {1, 1, 1}}, true};
 

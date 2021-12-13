@@ -29,13 +29,13 @@
 
 class EnvVarICDOverrideSetup : public ::testing::Test {
    protected:
-    virtual void SetUp() { env = std::unique_ptr<EnvVarICDOverrideShim>(new EnvVarICDOverrideShim()); }
+    virtual void SetUp() { env = std::unique_ptr<FrameworkEnvironment>(new FrameworkEnvironment()); }
 
     virtual void TearDown() {
         remove_env_var("VK_ICD_FILENAMES");
         env.reset();
     }
-    std::unique_ptr<EnvVarICDOverrideShim> env;
+    std::unique_ptr<FrameworkEnvironment> env;
 };
 
 // Don't support vk_icdNegotiateLoaderICDInterfaceVersion
@@ -43,31 +43,32 @@ class EnvVarICDOverrideSetup : public ::testing::Test {
 // does not support vk_icdGetInstanceProcAddr
 // must export vkGetInstanceProcAddr, vkCreateInstance, vkEnumerateInstanceExtensionProperties
 TEST_F(EnvVarICDOverrideSetup, version_0_none) {
-    env->SetEnvOverrideICD(TEST_ICD_PATH_EXPORT_NONE, "test_icd_export_none.json");
-    auto* driver = env->reset_icd();
+    env->add_icd(TestICDDetails(TEST_ICD_PATH_EXPORT_NONE).set_use_env_var_icd_filenames(true));
+    auto& driver = env->reset_icd();
 
     InstWrapper inst{env->vulkan_functions};
     inst.CheckCreate();
 
-    ASSERT_EQ(driver->called_vk_icd_gipa, CalledICDGIPA::vk_gipa);
+    ASSERT_EQ(driver.called_vk_icd_gipa, CalledICDGIPA::vk_gipa);
 }
 
 // Don't support vk_icdNegotiateLoaderICDInterfaceVersion
 // the loader calls vk_icdGetInstanceProcAddr first
 TEST_F(EnvVarICDOverrideSetup, version_1_icd_gipa) {
-    env->SetEnvOverrideICD(TEST_ICD_PATH_EXPORT_ICD_GIPA, "test_icd_export_icd_gipa.json");
-    auto* driver = env->reset_icd();
+    env->add_icd(TestICDDetails(TEST_ICD_PATH_EXPORT_ICD_GIPA).set_use_env_var_icd_filenames(true));
+    auto& driver = env->reset_icd();
 
     InstWrapper inst{env->vulkan_functions};
     inst.CheckCreate();
 
-    ASSERT_EQ(driver->called_vk_icd_gipa, CalledICDGIPA::vk_icd_gipa);
+    ASSERT_EQ(driver.called_vk_icd_gipa, CalledICDGIPA::vk_icd_gipa);
 }
 
 // support vk_icdNegotiateLoaderICDInterfaceVersion but not vk_icdGetInstanceProcAddr
 // should assert that `interface_vers == 0` due to version mismatch, only checkable in Debug Mode
 TEST_F(EnvVarICDOverrideSetup, version_negotiate_interface_version_death_test) {
-    env->SetEnvOverrideICD(TEST_ICD_PATH_EXPORT_NEGOTIATE_INTERFACE_VERSION, "test_icd_export_negotiate_interface_version.json");
+    env->add_icd(TestICDDetails(TEST_ICD_PATH_EXPORT_NEGOTIATE_INTERFACE_VERSION).set_use_env_var_icd_filenames(true));
+    auto& driver = env->reset_icd();
 
     InstWrapper inst{env->vulkan_functions};
 
@@ -84,21 +85,23 @@ TEST_F(EnvVarICDOverrideSetup, version_negotiate_interface_version_death_test) {
 
 // export vk_icdNegotiateLoaderICDInterfaceVersion and vk_icdGetInstanceProcAddr
 TEST_F(EnvVarICDOverrideSetup, version_2_negotiate_interface_version_and_icd_gipa) {
-    env->SetEnvOverrideICD(TEST_ICD_PATH_VERSION_2, "test_icd_version_2.json");
-    auto* driver = env->reset_icd();
+    env->add_icd(TestICDDetails(TEST_ICD_PATH_VERSION_2).set_use_env_var_icd_filenames(true));
+    auto& driver = env->reset_icd();
 
     InstWrapper inst{env->vulkan_functions};
     inst.CheckCreate();
 
-    ASSERT_EQ(driver->called_vk_icd_gipa, CalledICDGIPA::vk_icd_gipa);
+    ASSERT_EQ(driver.called_vk_icd_gipa, CalledICDGIPA::vk_icd_gipa);
 }
 
 class ICDInterfaceVersion2Plus : public ::testing::Test {
    protected:
-    virtual void SetUp() { env = std::unique_ptr<SingleICDShim>(new SingleICDShim(TEST_ICD_PATH_VERSION_2)); }
-
+    virtual void SetUp() {
+        env = std::unique_ptr<FrameworkEnvironment>(new FrameworkEnvironment());
+        env->add_icd(TestICDDetails(TEST_ICD_PATH_VERSION_2));
+    }
     virtual void TearDown() { env.reset(); }
-    std::unique_ptr<SingleICDShim> env;
+    std::unique_ptr<FrameworkEnvironment> env;
 };
 
 TEST_F(ICDInterfaceVersion2Plus, vk_icdNegotiateLoaderICDInterfaceVersion) {
@@ -172,12 +175,12 @@ TEST_F(ICDInterfaceVersion2Plus, l5_icd5) {
 class ICDInterfaceVersion2PlusEnumerateAdapterPhysicalDevices : public ::testing::Test {
    protected:
     virtual void SetUp() {
-        env = std::unique_ptr<SingleICDShim>(
-            new SingleICDShim(TEST_ICD_PATH_VERSION_2_EXPORT_ICD_ENUMERATE_ADAPTER_PHYSICAL_DEVICES));
+        env = std::unique_ptr<FrameworkEnvironment>(new FrameworkEnvironment());
+        env->add_icd(TestICDDetails(TEST_ICD_PATH_VERSION_2_EXPORT_ICD_ENUMERATE_ADAPTER_PHYSICAL_DEVICES));
     }
 
     virtual void TearDown() { env.reset(); }
-    std::unique_ptr<SingleICDShim> env;
+    std::unique_ptr<FrameworkEnvironment> env;
 };
 
 // Need more work to shim dxgi for this test to work
@@ -189,8 +192,8 @@ TEST_F(ICDInterfaceVersion2Plus, version_5) {
     auto& driver = env->get_test_icd();
     driver.physical_devices.emplace_back("physical_device_1");
     driver.physical_devices.emplace_back("physical_device_0");
-    uint32_t physical_count = driver.physical_devices.size();
-    uint32_t returned_physical_count = driver.physical_devices.size();
+    uint32_t physical_count = static_cast<uint32_t>(driver.physical_devices.size());
+    uint32_t returned_physical_count = static_cast<uint32_t>(driver.physical_devices.size());
     std::vector<VkPhysicalDevice> physical_device_handles = std::vector<VkPhysicalDevice>(physical_count);
 
     driver.min_icd_interface_version = 5;
@@ -210,8 +213,8 @@ TEST_F(ICDInterfaceVersion2PlusEnumerateAdapterPhysicalDevices, version_6) {
     auto& driver = env->get_test_icd();
     driver.physical_devices.emplace_back("physical_device_1");
     driver.physical_devices.emplace_back("physical_device_0");
-    uint32_t physical_count = driver.physical_devices.size();
-    uint32_t returned_physical_count = driver.physical_devices.size();
+    uint32_t physical_count = static_cast<uint32_t>(driver.physical_devices.size());
+    uint32_t returned_physical_count = static_cast<uint32_t>(driver.physical_devices.size());
     std::vector<VkPhysicalDevice> physical_device_handles = std::vector<VkPhysicalDevice>(physical_count);
 
     driver.min_icd_interface_version = 6;
@@ -219,7 +222,7 @@ TEST_F(ICDInterfaceVersion2PlusEnumerateAdapterPhysicalDevices, version_6) {
     uint32_t driver_index = 2;  // which drive this test pretends to be
     auto& known_driver = known_driver_list.at(2);
     DXGI_ADAPTER_DESC1 desc1{};
-    wcsncpy(&desc1.Description[0], L"TestDriver1", 128);
+    wcsncpy_s(&desc1.Description[0], 128, L"TestDriver1", 128);
     desc1.VendorId = known_driver.vendor_id;
     desc1.AdapterLuid;
     desc1.Flags = DXGI_ADAPTER_FLAG_NONE;
@@ -242,8 +245,8 @@ TEST_F(ICDInterfaceVersion2PlusEnumerateAdapterPhysicalDevices, EnumAdapters2) {
     auto& driver = env->get_test_icd();
     driver.physical_devices.emplace_back("physical_device_1");
     driver.physical_devices.emplace_back("physical_device_0");
-    uint32_t physical_count = driver.physical_devices.size();
-    uint32_t returned_physical_count = driver.physical_devices.size();
+    uint32_t physical_count = static_cast<uint32_t>(driver.physical_devices.size());
+    uint32_t returned_physical_count = static_cast<uint32_t>(driver.physical_devices.size());
     std::vector<VkPhysicalDevice> physical_device_handles = std::vector<VkPhysicalDevice>(physical_count);
 
     SHIM_D3DKMT_ADAPTERINFO d3dkmt_adapter_info{};
@@ -265,9 +268,10 @@ TEST_F(ICDInterfaceVersion2PlusEnumerateAdapterPhysicalDevices, EnumAdapters2) {
 #endif  // defined(WIN32)
 
 TEST(MultipleICDConfig, Basic) {
-    MultipleICDShim env(
-        {TestICDDetails(TEST_ICD_PATH_VERSION_2), TestICDDetails(TEST_ICD_PATH_VERSION_2), TestICDDetails(TEST_ICD_PATH_VERSION_2)},
-        DebugMode::none);
+    FrameworkEnvironment env{};
+    env.add_icd(TestICDDetails(TEST_ICD_PATH_VERSION_2));
+    env.add_icd(TestICDDetails(TEST_ICD_PATH_VERSION_2));
+    env.add_icd(TestICDDetails(TEST_ICD_PATH_VERSION_2));
 
     env.get_test_icd(0).physical_devices.emplace_back("physical_device_0");
     env.get_test_icd(1).physical_devices.emplace_back("physical_device_1");
@@ -277,9 +281,9 @@ TEST(MultipleICDConfig, Basic) {
     env.get_test_icd(1).physical_devices.at(0).properties.deviceType = VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU;
     env.get_test_icd(2).physical_devices.at(0).properties.deviceType = VK_PHYSICAL_DEVICE_TYPE_CPU;
 
-    strcpy(env.get_test_icd(0).physical_devices.at(0).properties.deviceName, "dev0");
-    strcpy(env.get_test_icd(1).physical_devices.at(0).properties.deviceName, "dev1");
-    strcpy(env.get_test_icd(2).physical_devices.at(0).properties.deviceName, "dev2");
+    copy_string_to_char_array("dev0", env.get_test_icd(0).physical_devices.at(0).properties.deviceName, VK_MAX_EXTENSION_NAME_SIZE);
+    copy_string_to_char_array("dev1", env.get_test_icd(1).physical_devices.at(0).properties.deviceName, VK_MAX_EXTENSION_NAME_SIZE);
+    copy_string_to_char_array("dev2", env.get_test_icd(2).physical_devices.at(0).properties.deviceName, VK_MAX_EXTENSION_NAME_SIZE);
 
     InstWrapper inst{env.vulkan_functions};
     inst.CheckCreate();
@@ -294,9 +298,10 @@ TEST(MultipleICDConfig, Basic) {
 }
 
 TEST(MultipleDriverConfig, DifferentICDInterfaceVersions) {
-    MultipleICDShim env({TestICDDetails(TEST_ICD_PATH_EXPORT_ICD_GIPA), TestICDDetails(TEST_ICD_PATH_VERSION_2),
-                         TestICDDetails(TEST_ICD_PATH_VERSION_2_EXPORT_ICD_GPDPA)},
-                        DebugMode::none);
+    FrameworkEnvironment env{};
+    env.add_icd(TestICDDetails(TEST_ICD_PATH_EXPORT_ICD_GIPA));
+    env.add_icd(TestICDDetails(TEST_ICD_PATH_VERSION_2));
+    env.add_icd(TestICDDetails(TEST_ICD_PATH_VERSION_2_EXPORT_ICD_GPDPA));
 
     TestICD& icd0 = env.get_test_icd(0);
     icd0.physical_devices.emplace_back("physical_device_0");

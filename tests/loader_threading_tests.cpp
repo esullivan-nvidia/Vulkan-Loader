@@ -33,11 +33,12 @@
 class ThreadingTests : public ::testing::Test {
    protected:
     virtual void SetUp() {
-        env = std::unique_ptr<SingleICDShim>(new SingleICDShim(TestICDDetails(TEST_ICD_PATH_VERSION_2, VK_MAKE_VERSION(1, 0, 0))));
+        env = std::unique_ptr<FrameworkEnvironment>(new FrameworkEnvironment());
+        env->add_icd(TestICDDetails(TEST_ICD_PATH_VERSION_6));
     }
 
     virtual void TearDown() { env.reset(); }
-    std::unique_ptr<SingleICDShim> env;
+    std::unique_ptr<FrameworkEnvironment> env;
 };
 
 void create_destroy_device_loop(uint32_t num_loops_create_destroy_device, uint32_t num_loops_try_get_proc_addr, InstWrapper* inst,
@@ -47,7 +48,7 @@ void create_destroy_device_loop(uint32_t num_loops_create_destroy_device, uint32
         dev.create_info.add_device_queue(DeviceQueueCreateInfo{}.add_priority(1.0));
         dev.CheckCreate(phys_dev);
 
-        for (uint32_t i = 0; i < num_loops_try_get_proc_addr; i++) {
+        for (uint32_t j = 0; j < num_loops_try_get_proc_addr; j++) {
             PFN_vkCmdBindPipeline p =
                 reinterpret_cast<PFN_vkCmdBindPipeline>(dev->vkGetDeviceProcAddr(dev.dev, "vkCmdBindPipeline"));
             ASSERT_NE(p, nullptr);

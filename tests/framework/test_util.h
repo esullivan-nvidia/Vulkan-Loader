@@ -52,12 +52,12 @@
 #include <iostream>
 #include <fstream>
 #include <ostream>
-#include <random>
 #include <string>
 #include <vector>
 #include <unordered_map>
 #include <utility>
 #include <memory>
+#include <functional>
 
 #include <cassert>
 #include <cstring>
@@ -137,9 +137,17 @@ enum class DebugMode {
 struct ManifestICD;    // forward declaration for FolderManager::write
 struct ManifestLayer;  // forward declaration for FolderManager::write
 
+#ifdef _WIN32
+// Environment variable list separator - not for filesystem paths
+const char OS_ENV_VAR_LIST_SEPARATOR = ';';
+#else
+// Environment variable list separator - not for filesystem paths
+const char OS_ENV_VAR_LIST_SEPARATOR = ':';
+#endif
+
 namespace fs {
 std::string make_native(std::string const&);
-std::string fixup_backslashes_in_path(std::string const& in_path);
+
 struct path {
    private:
 #if defined(WIN32)
@@ -194,6 +202,9 @@ struct path {
     std::string contents;
 };
 
+std::string fixup_backslashes_in_path(std::string const& in_path);
+fs::path fixup_backslashes_in_path(fs::path const& in_path);
+
 int create_folder(path const& path);
 int delete_folder(path const& folder);
 
@@ -223,6 +234,22 @@ class FolderManager {
 };
 }  // namespace fs
 
+// copy the contents of a std::string into a char array and add a null terminator at the end
+// src - std::string to read from
+// dst - char array to write to
+// size_dst - number of characters in the dst array
+inline void copy_string_to_char_array(std::string const& src, char* dst, size_t size_dst) {
+// Creates a spurious C4996 Warning in VS 2015 - ignore it
+#if defined(WIN32)
+#pragma warning(push)
+#pragma warning(disable : 4996)
+#endif
+    dst[src.copy(dst, size_dst - 1)] = 0;
+#if defined(WIN32)
+#pragma warning(pop)
+#endif
+}
+
 #if defined(WIN32)
 typedef HMODULE loader_platform_dl_handle;
 static loader_platform_dl_handle loader_platform_open_library(const char* lib_path) {
@@ -234,18 +261,18 @@ static loader_platform_dl_handle loader_platform_open_library(const char* lib_pa
     }
     return lib_handle;
 }
-static char* loader_platform_open_library_error(const char* libPath) {
+inline char* loader_platform_open_library_error(const char* libPath) {
     static char errorMsg[164];
     (void)snprintf(errorMsg, 163, "Failed to open dynamic library \"%s\" with error %lu", libPath, GetLastError());
     return errorMsg;
 }
-static void loader_platform_close_library(loader_platform_dl_handle library) { FreeLibrary(library); }
-static void* loader_platform_get_proc_address(loader_platform_dl_handle library, const char* name) {
+inline void loader_platform_close_library(loader_platform_dl_handle library) { FreeLibrary(library); }
+inline void* loader_platform_get_proc_address(loader_platform_dl_handle library, const char* name) {
     assert(library);
     assert(name);
     return (void*)GetProcAddress(library, name);
 }
-static char* loader_platform_get_proc_address_error(const char* name) {
+inline char* loader_platform_get_proc_address_error(const char* name) {
     static char errorMsg[120];
     (void)snprintf(errorMsg, 119, "Failed to find function \"%s\" in dynamic library", name);
     return errorMsg;
@@ -254,17 +281,17 @@ static char* loader_platform_get_proc_address_error(const char* name) {
 #elif defined(__linux__) || defined(__APPLE__) || defined(__FreeBSD__)
 
 typedef void* loader_platform_dl_handle;
-static inline loader_platform_dl_handle loader_platform_open_library(const char* libPath) {
+inline loader_platform_dl_handle loader_platform_open_library(const char* libPath) {
     return dlopen(libPath, RTLD_LAZY | RTLD_LOCAL);
 }
-static inline const char* loader_platform_open_library_error(const char* libPath) { return dlerror(); }
-static inline void loader_platform_close_library(loader_platform_dl_handle library) { dlclose(library); }
-static inline void* loader_platform_get_proc_address(loader_platform_dl_handle library, const char* name) {
+inline const char* loader_platform_open_library_error(const char* libPath) { return dlerror(); }
+inline void loader_platform_close_library(loader_platform_dl_handle library) { dlclose(library); }
+inline void* loader_platform_get_proc_address(loader_platform_dl_handle library, const char* name) {
     assert(library);
     assert(name);
     return dlsym(library, name);
 }
-static inline const char* loader_platform_get_proc_address_error(const char* name) { return dlerror(); }
+inline const char* loader_platform_get_proc_address_error(const char* name) { return dlerror(); }
 #endif
 
 struct LibraryWrapper {
@@ -437,12 +464,47 @@ inline std::string version_to_string(uint32_t version) {
            std::to_string(VK_VERSION_PATCH(version));
 }
 
+// Macro to ease the definition of variables with builder member functions
+// class_name = class the member variable is apart of
+// type = type of the variable
+// name = name of the variable
+// default_value = value to default initialize, use {} if nothing else makes sense
+#define BUILDER_VALUE(class_name, type, name, default_value) \
+    type name = default_value;                               \
+    class_name& set_##name(type const& name) {               \
+        this->name = name;                                   \
+        return *this;                                        \
+    }
+
+// Macro to ease the definition of vectors with builder member functions
+// class_name = class the member variable is apart of
+// type = type of the variable
+// name = name of the variable
+// singular_name = used for the `add_singluar_name` member function
+#define BUILDER_VECTOR(class_name, type, name, singular_name)                    \
+    std::vector<type> name;                                                      \
+    class_name& add_##singular_name(type const& singular_name) {                 \
+        this->name.push_back(singular_name);                                     \
+        return *this;                                                            \
+    }                                                                            \
+    class_name& add_##singular_name##s(std::vector<type> const& singular_name) { \
+        for (auto& elem : singular_name) this->name.push_back(elem);             \
+        return *this;                                                            \
+    }
+// Like BUILDER_VECTOR but for move only types - where passing in means giving up ownership
+#define BUILDER_VECTOR_MOVE_ONLY(class_name, type, name, singular_name) \
+    std::vector<type> name;                                             \
+    class_name& add_##singular_name(type&& singular_name) {             \
+        this->name.push_back(std::move(singular_name));                 \
+        return *this;                                                   \
+    }
+
 struct ManifestVersion {
-    uint32_t major = 1;
-    uint32_t minor = 0;
-    uint32_t patch = 0;
-    explicit ManifestVersion() noexcept {};
-    explicit ManifestVersion(uint32_t major, uint32_t minor, uint32_t patch) noexcept : major(major), minor(minor), patch(patch){};
+    BUILDER_VALUE(ManifestVersion, uint32_t, major, 1)
+    BUILDER_VALUE(ManifestVersion, uint32_t, minor, 0)
+    BUILDER_VALUE(ManifestVersion, uint32_t, patch, 0)
+    ManifestVersion() noexcept {};
+    ManifestVersion(uint32_t major, uint32_t minor, uint32_t patch) noexcept : major(major), minor(minor), patch(patch){};
 
     std::string get_version_str() const noexcept {
         return std::string("\"file_format_version\": \"") + std::to_string(major) + "." + std::to_string(minor) + "." +
@@ -450,28 +512,30 @@ struct ManifestVersion {
     }
 };
 
+// ManifestICD builder
 struct ManifestICD {
-    ManifestVersion file_format_version = ManifestVersion();
-    uint32_t api_version = VK_MAKE_VERSION(1, 0, 0);
-    std::string lib_path;
-
+    BUILDER_VALUE(ManifestICD, ManifestVersion, file_format_version, ManifestVersion())
+    BUILDER_VALUE(ManifestICD, uint32_t, api_version, 0)
+    BUILDER_VALUE(ManifestICD, std::string, lib_path, {})
     std::string get_manifest_str() const;
 };
 
+// ManifestLayer builder
 struct ManifestLayer {
     struct LayerDescription {
         enum class Type { INSTANCE, GLOBAL, DEVICE };
-        std::string get_type_str(Type type) const {
-            if (type == Type::GLOBAL)
+        std::string get_type_str(Type layer_type) const {
+            if (layer_type == Type::GLOBAL)
                 return "GLOBAL";
-            else if (type == Type::DEVICE)
+            else if (layer_type == Type::DEVICE)
                 return "DEVICE";
             else  // default
                 return "INSTANCE";
         }
         struct FunctionOverride {
-            std::string vk_func;
-            std::string override_name;
+            BUILDER_VALUE(FunctionOverride, std::string, vk_func, {})
+            BUILDER_VALUE(FunctionOverride, std::string, override_name, {})
+
             std::string get_manifest_str() const { return std::string("{ \"") + vk_func + "\":\"" + override_name + "\" }"; }
         };
         struct Extension {
@@ -483,49 +547,51 @@ struct ManifestLayer {
             std::vector<std::string> entrypoints;
             std::string get_manifest_str() const;
         };
-        std::string name;
-        Type type = Type::INSTANCE;
-        fs::path lib_path;
-        uint32_t api_version = VK_MAKE_VERSION(1, 0, 0);
-        uint32_t implementation_version = 0;
-        std::string description;
-        std::vector<FunctionOverride> functions;
-        std::vector<Extension> instance_extensions;
-        std::vector<Extension> device_extensions;
-        std::string enable_environment;
-        std::string disable_environment;
-        std::vector<std::string> component_layers;
-        std::vector<std::string> pre_instance_functions;
+        BUILDER_VALUE(LayerDescription, std::string, name, {})
+        BUILDER_VALUE(LayerDescription, Type, type, Type::INSTANCE)
+        BUILDER_VALUE(LayerDescription, fs::path, lib_path, {})
+        BUILDER_VALUE(LayerDescription, uint32_t, api_version, VK_MAKE_VERSION(1, 0, 0))
+        BUILDER_VALUE(LayerDescription, uint32_t, implementation_version, 0)
+        BUILDER_VALUE(LayerDescription, std::string, description, {})
+        BUILDER_VECTOR(LayerDescription, FunctionOverride, functions, function)
+        BUILDER_VECTOR(LayerDescription, Extension, instance_extensions, instance_extension)
+        BUILDER_VECTOR(LayerDescription, Extension, device_extensions, device_extension)
+        BUILDER_VALUE(LayerDescription, std::string, enable_environment, {})
+        BUILDER_VALUE(LayerDescription, std::string, disable_environment, {})
+        BUILDER_VECTOR(LayerDescription, std::string, component_layers, component_layer)
+        BUILDER_VECTOR(LayerDescription, std::string, pre_instance_functions, pre_instance_function)
 
         std::string get_manifest_str() const;
         VkLayerProperties get_layer_properties() const;
     };
-    ManifestVersion file_format_version;
-    std::vector<LayerDescription> layers;
+    BUILDER_VALUE(ManifestLayer, ManifestVersion, file_format_version, {})
+    BUILDER_VECTOR(ManifestLayer, LayerDescription, layers, layer)
 
     std::string get_manifest_str() const;
 };
 
 struct Extension {
-    std::string extensionName;
-    uint32_t specVersion = VK_MAKE_VERSION(1, 0, 0);
+    BUILDER_VALUE(Extension, std::string, extensionName, {})
+    BUILDER_VALUE(Extension, uint32_t, specVersion, VK_MAKE_VERSION(1, 0, 0))
 
     Extension(std::string extensionName, uint32_t specVersion = VK_MAKE_VERSION(1, 0, 0))
         : extensionName(extensionName), specVersion(specVersion) {}
 
     VkExtensionProperties get() const noexcept {
         VkExtensionProperties props{};
-        std::strncpy(props.extensionName, extensionName.c_str(), VK_MAX_EXTENSION_NAME_SIZE);
+        copy_string_to_char_array(extensionName, &props.extensionName[0], VK_MAX_EXTENSION_NAME_SIZE);
         props.specVersion = specVersion;
         return props;
     }
 };
 
 struct MockQueueFamilyProperties {
+    BUILDER_VALUE(MockQueueFamilyProperties, VkQueueFamilyProperties, properties, {})
+    BUILDER_VALUE(MockQueueFamilyProperties, bool, support_present, false)
+
     MockQueueFamilyProperties(VkQueueFamilyProperties properties, bool support_present = false)
         : properties(properties), support_present(support_present) {}
-    VkQueueFamilyProperties properties{};
-    bool support_present = false;
+
     VkQueueFamilyProperties get() const noexcept { return properties; }
 };
 
@@ -546,13 +612,16 @@ struct VulkanFunctions {
     PFN_vkGetPhysicalDeviceFeatures vkGetPhysicalDeviceFeatures = nullptr;
     PFN_vkGetPhysicalDeviceFeatures2 vkGetPhysicalDeviceFeatures2 = nullptr;
     PFN_vkGetPhysicalDeviceFormatProperties vkGetPhysicalDeviceFormatProperties = nullptr;
+    PFN_vkGetPhysicalDeviceFormatProperties2 vkGetPhysicalDeviceFormatProperties2 = nullptr;
     PFN_vkGetPhysicalDeviceImageFormatProperties vkGetPhysicalDeviceImageFormatProperties = nullptr;
+    PFN_vkGetPhysicalDeviceImageFormatProperties2 vkGetPhysicalDeviceImageFormatProperties2 = nullptr;
+    PFN_vkGetPhysicalDeviceSparseImageFormatProperties vkGetPhysicalDeviceSparseImageFormatProperties = nullptr;
+    PFN_vkGetPhysicalDeviceSparseImageFormatProperties2 vkGetPhysicalDeviceSparseImageFormatProperties2 = nullptr;
     PFN_vkGetPhysicalDeviceProperties vkGetPhysicalDeviceProperties = nullptr;
     PFN_vkGetPhysicalDeviceProperties2 vkGetPhysicalDeviceProperties2 = nullptr;
     PFN_vkGetPhysicalDeviceQueueFamilyProperties vkGetPhysicalDeviceQueueFamilyProperties = nullptr;
     PFN_vkGetPhysicalDeviceQueueFamilyProperties2 vkGetPhysicalDeviceQueueFamilyProperties2 = nullptr;
     PFN_vkGetPhysicalDeviceMemoryProperties vkGetPhysicalDeviceMemoryProperties = nullptr;
-    PFN_vkGetPhysicalDeviceFormatProperties2 vkGetPhysicalDeviceFormatProperties2 = nullptr;
     PFN_vkGetPhysicalDeviceMemoryProperties2 vkGetPhysicalDeviceMemoryProperties2 = nullptr;
     PFN_vkGetPhysicalDeviceSurfaceSupportKHR vkGetPhysicalDeviceSurfaceSupportKHR = nullptr;
     PFN_vkGetPhysicalDeviceSurfaceFormatsKHR vkGetPhysicalDeviceSurfaceFormatsKHR = nullptr;
@@ -560,29 +629,74 @@ struct VulkanFunctions {
     PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR vkGetPhysicalDeviceSurfaceCapabilitiesKHR = nullptr;
     PFN_vkEnumerateDeviceExtensionProperties vkEnumerateDeviceExtensionProperties = nullptr;
     PFN_vkEnumerateDeviceLayerProperties vkEnumerateDeviceLayerProperties = nullptr;
+    PFN_vkGetPhysicalDeviceExternalBufferProperties vkGetPhysicalDeviceExternalBufferProperties = nullptr;
+    PFN_vkGetPhysicalDeviceExternalFenceProperties vkGetPhysicalDeviceExternalFenceProperties = nullptr;
+    PFN_vkGetPhysicalDeviceExternalSemaphoreProperties vkGetPhysicalDeviceExternalSemaphoreProperties = nullptr;
 
     PFN_vkGetDeviceProcAddr vkGetDeviceProcAddr = nullptr;
     PFN_vkCreateDevice vkCreateDevice = nullptr;
+    PFN_vkCreateDebugUtilsMessengerEXT vkCreateDebugUtilsMessengerEXT = nullptr;
+    PFN_vkDestroyDebugUtilsMessengerEXT vkDestroyDebugUtilsMessengerEXT = nullptr;
 
-// WSI
+    // WSI
+    PFN_vkCreateHeadlessSurfaceEXT vkCreateHeadlessSurfaceEXT = nullptr;
+    PFN_vkCreateDisplayPlaneSurfaceKHR vkCreateDisplayPlaneSurfaceKHR = nullptr;
+    PFN_vkGetPhysicalDeviceDisplayPropertiesKHR vkGetPhysicalDeviceDisplayPropertiesKHR = nullptr;
+    PFN_vkGetPhysicalDeviceDisplayPlanePropertiesKHR vkGetPhysicalDeviceDisplayPlanePropertiesKHR = nullptr;
+    PFN_vkGetDisplayPlaneSupportedDisplaysKHR vkGetDisplayPlaneSupportedDisplaysKHR = nullptr;
+    PFN_vkGetDisplayModePropertiesKHR vkGetDisplayModePropertiesKHR = nullptr;
+    PFN_vkCreateDisplayModeKHR vkCreateDisplayModeKHR = nullptr;
+    PFN_vkGetDisplayPlaneCapabilitiesKHR vkGetDisplayPlaneCapabilitiesKHR = nullptr;
+    PFN_vkGetPhysicalDevicePresentRectanglesKHR vkGetPhysicalDevicePresentRectanglesKHR = nullptr;
+    PFN_vkGetPhysicalDeviceDisplayProperties2KHR vkGetPhysicalDeviceDisplayProperties2KHR = nullptr;
+    PFN_vkGetPhysicalDeviceDisplayPlaneProperties2KHR vkGetPhysicalDeviceDisplayPlaneProperties2KHR = nullptr;
+    PFN_vkGetDisplayModeProperties2KHR vkGetDisplayModeProperties2KHR = nullptr;
+    PFN_vkGetDisplayPlaneCapabilities2KHR vkGetDisplayPlaneCapabilities2KHR = nullptr;
+    PFN_vkGetPhysicalDeviceSurfaceCapabilities2KHR vkGetPhysicalDeviceSurfaceCapabilities2KHR = nullptr;
+    PFN_vkGetPhysicalDeviceSurfaceFormats2KHR vkGetPhysicalDeviceSurfaceFormats2KHR = nullptr;
+
 #ifdef VK_USE_PLATFORM_ANDROID_KHR
-    PFN_vkCreateAndroidSurfaceKHR vkCreateAndroidSurfaceKHR;
-#endif
+    PFN_vkCreateAndroidSurfaceKHR vkCreateAndroidSurfaceKHR = nullptr;
+#endif  // VK_USE_PLATFORM_ANDROID_KHR
+#ifdef VK_USE_PLATFORM_DIRECTFB_EXT
+    PFN_vkCreateDirectFBSurfaceEXT vkCreateDirectFBSurfaceEXT = nullptr;
+    PFN_vkGetPhysicalDeviceDirectFBPresentationSupportEXT vkGetPhysicalDeviceDirectFBPresentationSupportEXT = nullptr;
+#endif  // VK_USE_PLATFORM_DIRECTFB_EXT
+#ifdef VK_USE_PLATFORM_FUCHSIA
+    PFN_vkCreateImagePipeSurfaceFUCHSIA vkCreateImagePipeSurfaceFUCHSIA = nullptr;
+#endif  // VK_USE_PLATFORM_FUCHSIA
+#ifdef VK_USE_PLATFORM_GGP
+    PFN_vkCreateStreamDescriptorSurfaceGGP vkCreateStreamDescriptorSurfaceGGP = nullptr;
+#endif  // VK_USE_PLATFORM_GGP
+#ifdef VK_USE_PLATFORM_IOS_MVK
+    PFN_vkCreateIOSSurfaceMVK vkCreateIOSSurfaceMVK = nullptr;
+#endif  // VK_USE_PLATFORM_IOS_MVK
+#ifdef VK_USE_PLATFORM_MACOS_MVK
+    PFN_vkCreateMacOSSurfaceMVK vkCreateMacOSSurfaceMVK = nullptr;
+#endif  // VK_USE_PLATFORM_MACOS_MVK
 #ifdef VK_USE_PLATFORM_METAL_EXT
-    PFN_vkCreateMetalSurfaceEXT vkCreateMetalSurfaceEXT;
-#endif
+    PFN_vkCreateMetalSurfaceEXT vkCreateMetalSurfaceEXT = nullptr;
+#endif  // VK_USE_PLATFORM_METAL_EXT
+#ifdef VK_USE_PLATFORM_SCREEN_QNX
+    PFN_vkCreateScreenSurfaceQNX vkCreateScreenSurfaceQNX = nullptr;
+    PFN_vkGetPhysicalDeviceScreenPresentationSupportQNX vkGetPhysicalDeviceScreenPresentationSupportQNX = nullptr;
+#endif  // VK_USE_PLATFORM_SCREEN_QNX
 #ifdef VK_USE_PLATFORM_WAYLAND_KHR
-    PFN_vkCreateWaylandSurfaceKHR vkCreateWaylandSurfaceKHR;
-#endif
+    PFN_vkCreateWaylandSurfaceKHR vkCreateWaylandSurfaceKHR = nullptr;
+    PFN_vkGetPhysicalDeviceWaylandPresentationSupportKHR vkGetPhysicalDeviceWaylandPresentationSupportKHR = nullptr;
+#endif  // VK_USE_PLATFORM_WAYLAND_KHR
 #ifdef VK_USE_PLATFORM_XCB_KHR
-    PFN_vkCreateXcbSurfaceKHR vkCreateXcbSurfaceKHR;
-#endif
+    PFN_vkCreateXcbSurfaceKHR vkCreateXcbSurfaceKHR = nullptr;
+    PFN_vkGetPhysicalDeviceXcbPresentationSupportKHR vkGetPhysicalDeviceXcbPresentationSupportKHR = nullptr;
+#endif  // VK_USE_PLATFORM_XCB_KHR
 #ifdef VK_USE_PLATFORM_XLIB_KHR
-    PFN_vkCreateXlibSurfaceKHR vkCreateXlibSurfaceKHR;
-#endif
+    PFN_vkCreateXlibSurfaceKHR vkCreateXlibSurfaceKHR = nullptr;
+    PFN_vkGetPhysicalDeviceXlibPresentationSupportKHR vkGetPhysicalDeviceXlibPresentationSupportKHR = nullptr;
+#endif  // VK_USE_PLATFORM_XLIB_KHR
 #ifdef VK_USE_PLATFORM_WIN32_KHR
-    PFN_vkCreateWin32SurfaceKHR vkCreateWin32SurfaceKHR;
-#endif
+    PFN_vkCreateWin32SurfaceKHR vkCreateWin32SurfaceKHR = nullptr;
+    PFN_vkGetPhysicalDeviceWin32PresentationSupportKHR vkGetPhysicalDeviceWin32PresentationSupportKHR = nullptr;
+#endif  // VK_USE_PLATFORM_WIN32_KHR
     PFN_vkDestroySurfaceKHR vkDestroySurfaceKHR = nullptr;
 
     // device functions
@@ -593,48 +707,37 @@ struct VulkanFunctions {
 };
 
 struct InstanceCreateInfo {
-    VkInstanceCreateInfo inst_info{};
-    VkApplicationInfo app_info{};
-    std::string app_name;
-    std::string engine_name;
-    uint32_t app_version = 0;
-    uint32_t engine_version = 0;
-    uint32_t api_version = VK_MAKE_VERSION(1, 0, 0);
-    std::vector<const char*> enabled_layers;
-    std::vector<const char*> enabled_extensions;
+    BUILDER_VALUE(InstanceCreateInfo, VkInstanceCreateInfo, instance_info, {})
+    BUILDER_VALUE(InstanceCreateInfo, VkApplicationInfo, application_info, {})
+    BUILDER_VALUE(InstanceCreateInfo, std::string, app_name, {})
+    BUILDER_VALUE(InstanceCreateInfo, std::string, engine_name, {})
+    BUILDER_VALUE(InstanceCreateInfo, uint32_t, app_version, 0)
+    BUILDER_VALUE(InstanceCreateInfo, uint32_t, engine_version, 0)
+    BUILDER_VALUE(InstanceCreateInfo, uint32_t, api_version, VK_MAKE_VERSION(1, 0, 0))
+    BUILDER_VECTOR(InstanceCreateInfo, const char*, enabled_layers, layer)
+    BUILDER_VECTOR(InstanceCreateInfo, const char*, enabled_extensions, extension)
 
     InstanceCreateInfo();
 
     VkInstanceCreateInfo* get() noexcept;
-    InstanceCreateInfo& set_application_name(std::string app_name);
-    InstanceCreateInfo& set_engine_name(std::string engine_name);
-    InstanceCreateInfo& set_app_version(uint32_t app_version);
-    InstanceCreateInfo& set_engine_version(uint32_t engine_version);
-    InstanceCreateInfo& set_api_version(uint32_t api_version);
     InstanceCreateInfo& set_api_version(uint32_t major, uint32_t minor, uint32_t patch);
-    InstanceCreateInfo& add_layer(const char* layer_name);
-    InstanceCreateInfo& add_extension(const char* ext_name);
 };
 
 struct DeviceQueueCreateInfo {
-    VkDeviceQueueCreateInfo queue{};
-    std::vector<float> priorities;
+    BUILDER_VALUE(DeviceQueueCreateInfo, VkDeviceQueueCreateInfo, queue_create_info, {})
+    BUILDER_VECTOR(DeviceQueueCreateInfo, float, priorities, priority)
+
     DeviceQueueCreateInfo();
-    DeviceQueueCreateInfo& add_priority(float priority);
-    DeviceQueueCreateInfo& set_props(VkQueueFamilyProperties props);
 };
 
 struct DeviceCreateInfo {
-    VkDeviceCreateInfo dev{};
-    std::vector<const char*> enabled_extensions;
-    std::vector<const char*> enabled_layers;
-    std::vector<DeviceQueueCreateInfo> queue_info_details;
-    std::vector<VkDeviceQueueCreateInfo> queue_infos;
+    BUILDER_VALUE(DeviceCreateInfo, VkDeviceCreateInfo, dev, {})
+    BUILDER_VECTOR(DeviceCreateInfo, const char*, enabled_extensions, extension)
+    BUILDER_VECTOR(DeviceCreateInfo, const char*, enabled_layers, layer)
+    BUILDER_VECTOR(DeviceCreateInfo, DeviceQueueCreateInfo, queue_info_details, device_queue)
+    BUILDER_VECTOR(DeviceCreateInfo, VkDeviceQueueCreateInfo, queue_infos, queue_info)
 
     VkDeviceCreateInfo* get() noexcept;
-    DeviceCreateInfo& add_layer(const char* layer_name);
-    DeviceCreateInfo& add_extension(const char* ext_name);
-    DeviceCreateInfo& add_device_queue(DeviceQueueCreateInfo queue_info_detail);
 };
 
 inline bool operator==(const VkExtent3D& a, const VkExtent3D& b) {
@@ -658,3 +761,8 @@ inline bool operator==(const VkExtensionProperties& a, const VkExtensionProperti
     return string_eq(a.extensionName, b.extensionName, 256) && a.specVersion == b.specVersion;
 }
 inline bool operator!=(const VkExtensionProperties& a, const VkExtensionProperties& b) { return !(a == b); }
+
+struct VulkanFunction {
+    const char* name;
+    void* function;
+};
